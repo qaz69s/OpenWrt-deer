@@ -15,10 +15,13 @@ chmod 0700 /etc/deer 2>/dev/null || true
 # 产品日志目录（/tmp 是 tmpfs，重启即清空）
 mkdir -p /tmp/log/deer
 
-# geodata 软链（daed 要求 geoip/geosite 位于 web_root 的父目录）
-mkdir -p /usr/share/deer
-ln -sf ../v2ray/geoip.dat   /usr/share/deer/geoip.dat   2>/dev/null || true
-ln -sf ../v2ray/geosite.dat /usr/share/deer/geosite.dat 2>/dev/null || true
+# geodata 软链：/usr/share/deer 是 deer 的 geodata_dir（init 会通过 DAE_LOCATION_ASSET
+# 传给 daed）；/usr/share/daed 是 daed 的默认搜索目录，做兜底。
+mkdir -p /usr/share/deer /usr/share/daed
+ln -sf ../v2ray/geoip.dat   /usr/share/deer/geoip.dat    2>/dev/null || true
+ln -sf ../v2ray/geosite.dat /usr/share/deer/geosite.dat  2>/dev/null || true
+[ -e /usr/share/daed/geoip.dat ]   || ln -sf ../v2ray/geoip.dat   /usr/share/daed/geoip.dat   2>/dev/null || true
+[ -e /usr/share/daed/geosite.dat ] || ln -sf ../v2ray/geosite.dat /usr/share/daed/geosite.dat 2>/dev/null || true
 
 # 让 rpcd 立刻加载新的 ACL / helper
 /etc/init.d/rpcd restart

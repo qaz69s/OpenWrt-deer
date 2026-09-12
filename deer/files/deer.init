@@ -18,8 +18,10 @@ DEFAULT_CONFIG_DIR=/etc/deer
 DEFAULT_LISTEN=0.0.0.0:2023
 DEFAULT_WEB_ROOT=/usr/share/deer/web
 DEFAULT_LOG_DIR=/tmp/log/deer
-GEOIP=/usr/share/deer/geoip.dat
-GEOSITE=/usr/share/deer/geosite.dat
+DEFAULT_GEODATA_DIR=/usr/share/deer
+# GEOIP / GEOSITE 在 load_deer_config 里按 geodata_dir 计算
+GEOIP=
+GEOSITE=
 RESOLV_DEER=/tmp/resolv.conf.deer
 
 EXTRA_COMMANDS="hot_reload"
@@ -32,6 +34,18 @@ load_deer_config() {
 	config_get state main state "$config_dir/daed.db"
 	config_get listen main listen "$DEFAULT_LISTEN"
 	config_get web_root main web_root "$DEFAULT_WEB_ROOT"
+	# geodata（geoip.dat / geosite.dat）目录：默认取 web_root 的父目录，与 daed 的
+	# geodata_dir_for_web_root() 约定一致（面板的 geodata 状态页读的就是这里）。
+	# ⚠️ 但 daed 在构建/预检运行时只用 DAE_LOCATION_ASSET、调用方传入目录、
+	# 以及 /etc/daed、/usr/local/share/daed、/usr/share/daed、~/.local/share/daed
+	# 这些固定目录去找 .dat（GeodataResolver::new 的顺序），web_root 不在其中 ——
+	# 所以必须在下面 export / procd 传 DAE_LOCATION_ASSET，否则会报
+	# `geodata asset geoip.dat not found in [...]`。
+	config_get geodata_dir main geodata_dir ""
+	[ -n "$geodata_dir" ] || geodata_dir="$(dirname "$web_root")"
+	GEOIP="$geodata_dir/geoip.dat"
+	GEOSITE="$geodata_dir/geosite.dat"
+	export DAE_LOCATION_ASSET="$geodata_dir"
 	config_get log_dir main log_dir "$DEFAULT_LOG_DIR"
 	config_get_bool api_only main api_only 0
 
@@ -63,10 +77,19 @@ validate_deer_runtime_config() {
 	"$PROG" validate -c "$config_dir" --state "$state" --runtime
 }
 
-# geoip.dat / geosite.dat 必须是 web_root 的父目录（daed 的 geodata_dir_for_web_root）
+# geoip.dat / geosite.dat 放在 geodata_dir（默认 web_root 的父目录），
+# 并通过 DAE_LOCATION_ASSET 告知 daed（详见 load_deer_config 里的说明）
 ensure_geodata() {
 	[ -f "$GEOIP" ]   || ln -sf ../v2ray/geoip.dat   "$GEOIP"   2>/dev/null
 	[ -f "$GEOSITE" ] || ln -sf ../v2ray/geosite.dat "$GEOSITE" 2>/dev/null
+
+	# 兜底：daed 的产品默认目录之一（GeodataResolver 的固定搜索路径，
+	# 也是 daed service-metadata 自己声明 geoip/geosite 的路径）。即使
+	# DAE_LOCATION_ASSET 因为某种原因没传到运行时，预检/运行时也能在这里找到。
+	# 已存在同名文件则不覆盖（留给用户放自己的 geodata 用）。
+	[ -d /usr/share/daed ] || mkdir -p /usr/share/daed 2>/dev/null
+	[ -e /usr/share/daed/geoip.dat ]   || ln -sf ../v2ray/geoip.dat   /usr/share/daed/geoip.dat   2>/dev/null
+	[ -e /usr/share/daed/geosite.dat ] || ln -sf ../v2ray/geosite.dat /usr/share/daed/geosite.dat 2>/dev/null
 }
 
 # 可选：把 /tmp/resolv.conf 指向 daed 的 DNS（默认关闭）
@@ -146,6 +169,8 @@ start_service() {
 	procd_set_param env PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 	procd_append_param env DAED_PRODUCT_LOG_DIR="$log_dir"
 	procd_append_param env NO_COLOR=1
+	# 运行时/预检的 geodata 查找靠这个变量（见 load_deer_config 里的说明）
+	procd_append_param env DAE_LOCATION_ASSET="$geodata_dir"
 	[ -n "$http_profile" ] && procd_append_param env HTTP_PROFILE="$http_profile"
 	[ -n "$resident_runtime_profile" ] && procd_append_param env RESIDENT_RUNTIME_PROFILE="$resident_runtime_profile"
 	[ -n "$http_workers" ] && procd_append_param env HTTP_WORKERS="$http_workers"

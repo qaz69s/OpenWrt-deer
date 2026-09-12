@@ -24,12 +24,18 @@ var LEVEL_CFG = {
 };
 var LEVEL_LABEL = { error: 'E', warn: 'W', info: 'I', debug: 'D', trace: 'T' };
 
+var MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+
 function normalizeLevel(lv) {
 	var l = String(lv || '').toLowerCase();
 	if (l === 'warning') l = 'warn';
-	if (l === 'err' || l === 'fatal' || l === 'critical') l = 'error';
+	if (l === 'notice' || l === 'informational') l = 'info';
+	if (l === 'err' || l === 'fatal' || l === 'critical' || l === 'crit' || l === 'alert' || l === 'emerg')
+		l = 'error';
 	return LEVEL_CFG[l] ? l : 'info';
 }
+
+function pad2(n) { return (n < 10 ? '0' : '') + n; }
 
 function hhmmss(ts) {
 	if (!ts) return '--:--:--';
@@ -37,11 +43,13 @@ function hhmmss(ts) {
 	return m ? m[1] : String(ts).replace('T', ' ').slice(0, 19);
 }
 
-/* daed 产品日志是真 JSONL：{"fields":{...},"id":N,"level":"info","message":"...","ts":"..."} */
-function parseJsonlLine(raw) {
+/* ── 产品日志：真 JSONL，{"fields":{...},"id":N,"level":"info","message":"...","ts":"..."} ── */
+function parseProductLine(raw) {
 	var obj;
-	try { obj = JSON.parse(raw); } catch (e) { return { raw: raw }; }
-	if (!obj || typeof obj !== 'object') return { raw: raw };
+	try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+	if (!obj || typeof obj !== 'object') {
+		return { time: hhmmss(raw), level: 'info', message: String(raw), fields: '', ms: 0, source: 'product' };
+	}
 
 	var fields = [];
 	if (obj.fields && typeof obj.fields === 'object') {
@@ -52,24 +60,58 @@ function parseJsonlLine(raw) {
 		});
 	}
 
+	var ms = Date.parse(obj.ts);
 	return {
 		time:    hhmmss(obj.ts),
 		level:   normalizeLevel(obj.level),
 		message: obj.message || '',
 		fields:  fields.join('  '),
-		id:      obj.id,
+		ms:      isNaN(ms) ? 0 : ms,
+		source:  'product',
 	};
+}
+
+/* ── 系统日志：logread 行，Sat Sep 12 14:02:50 2026 daemon.err procd: message ── */
+var SYSLOG_RE = /^(?:[A-Z][a-z]{2}\s+)?([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})\s+(\S+)\.(\S+)\s+([^:]+):\s?([\s\S]*)$/;
+
+function parseSyslogLine(raw) {
+	var line = String(raw);
+	var m = SYSLOG_RE.exec(line);
+	if (!m) {
+		return { time: hhmmss(line), level: 'info', message: line, fields: '', ms: 0, source: 'syslog' };
+	}
+
+	var month = MONTHS[String(m[1]).toLowerCase()];
+	var ms = Date.parse(m[4] + '-' + pad2((month === undefined ? 0 : month) + 1) + '-' + pad2(parseInt(m[2], 10)) + 'T' + m[3]);
+	return {
+		time:    m[3],
+		level:   normalizeLevel(m[6]),
+		message: String(m[7]).trim() + ': ' + m[8],
+		fields:  '',
+		ms:      isNaN(ms) ? 0 : ms,
+		source:  'syslog',
+	};
+}
+
+function toEntries(productRaw, syslogRaw) {
+	var entries = [];
+	String(productRaw || '').split('\n').forEach(function (l) {
+		if (l.length) entries.push(parseProductLine(l));
+	});
+	String(syslogRaw || '').split('\n').forEach(function (l) {
+		if (l.length) entries.push(parseSyslogLine(l));
+	});
+	return entries;
 }
 
 return baseclass.extend({
 	render: function () {
-		var source       = 'product';
 		var paused       = false;
 		var newestFirst  = true;
 		var searchTerm   = '';
 		var autoTimer    = null;
 		var visible      = true;
-		var lastRaw      = null;
+		var lastEntries  = null;
 		var pendingFetch = false;
 
 		var body = E('div', { class: 'dy-log-body', style: [
@@ -105,18 +147,20 @@ return baseclass.extend({
 			body.appendChild(E('div', { style: 'color:var(--dy-dim);' }, [msg]));
 		}
 
-		function renderLines(raw) {
-			var lines = String(raw || '').split('\n').filter(function (l) { return l.length > 0; });
+		function renderEntries(entries) {
+			var list = entries.slice();
 
 			if (searchTerm) {
 				var needle = searchTerm.toLowerCase();
-				lines = lines.filter(function (l) { return l.toLowerCase().indexOf(needle) !== -1; });
+				list = list.filter(function (e) {
+					return (e.time + ' ' + e.message + ' ' + e.fields).toLowerCase().indexOf(needle) !== -1;
+				});
 			}
-			if (newestFirst) lines = lines.slice().reverse();
+			list.sort(function (a, b) { return newestFirst ? (b.ms - a.ms) : (a.ms - b.ms); });
 
 			while (body.firstChild) body.removeChild(body.firstChild);
 
-			if (lines.length === 0) {
+			if (list.length === 0) {
 				renderEmpty(_('（暂无日志）'));
 				metaEl.textContent = '0 ' + _('行');
 				return;
@@ -124,39 +168,36 @@ return baseclass.extend({
 
 			var frag = document.createDocumentFragment();
 			var shown = 0;
-			lines.forEach(function (raw2) {
+			list.forEach(function (entry) {
 				if (shown >= 400) return;
 				shown++;
 
-				var parsed = (source === 'product') ? parseJsonlLine(raw2) : { raw: raw2 };
-				var cfg    = LEVEL_CFG[parsed.level] || LEVEL_CFG.info;
+				var cfg = LEVEL_CFG[entry.level] || LEVEL_CFG.info;
 
-				var timeEl = E('span', { style: 'color:var(--dy-dim);flex-shrink:0;' }, [parsed.time || '']);
-				var tag    = null;
-				if (parsed.level) {
-					tag = E('span', { style: [
-						'background:' + cfg.tagBg + ';color:#fff;',
-						'border-radius:3px;padding:0 4px;font-size:10px;font-weight:700;',
-						'flex-shrink:0;margin-right:6px;',
-					].join('') }, [LEVEL_LABEL[parsed.level] || 'I']);
-				}
+				var timeEl = E('span', { style: 'color:var(--dy-dim);flex-shrink:0;' }, [entry.time || '']);
 
-				var content;
-				if (parsed.raw !== undefined) {
-					content = E('span', { style: 'white-space:pre-wrap;word-break:break-all;' }, [parsed.raw]);
-				} else {
-					content = E('span', { style: 'white-space:pre-wrap;word-break:break-all;color:' + (cfg.color || 'inherit') });
-					content.appendChild(document.createTextNode(parsed.message));
-					if (parsed.fields) {
-						content.appendChild(E('span', { style: 'color:var(--dy-muted);' }, ['  ' + parsed.fields]));
-					}
+				var tag = E('span', { style: [
+					'background:' + cfg.tagBg + ';color:#fff;',
+					'border-radius:3px;padding:0 4px;font-size:10px;font-weight:700;',
+					'flex-shrink:0;',
+				].join('') }, [LEVEL_LABEL[entry.level] || 'I']);
+
+				/* 系统日志行加一个很淡的来源标记，产品日志行维持原样 */
+				var srcTag = (entry.source === 'syslog')
+					? E('span', { style: 'color:var(--dy-dim);font-size:10px;flex-shrink:0;opacity:.8;' }, ['sys'])
+					: null;
+
+				var content = E('span', { style: 'white-space:pre-wrap;word-break:break-all;color:' + (cfg.color || 'inherit') });
+				content.appendChild(document.createTextNode(entry.message));
+				if (entry.fields) {
+					content.appendChild(E('span', { style: 'color:var(--dy-muted);' }, ['  ' + entry.fields]));
 				}
 
 				var row = E('div', {
 					style: 'display:flex;align-items:flex-start;gap:8px;padding:2px 4px;border-radius:3px;' +
 						'border-bottom:1px solid var(--dy-log-divider);' +
 						(cfg.rowBg ? 'background:' + cfg.rowBg + ';' : ''),
-				}, [timeEl, tag, content].filter(Boolean));
+				}, [timeEl, tag, srcTag, content].filter(Boolean));
 
 				frag.appendChild(row);
 			});
@@ -165,64 +206,54 @@ return baseclass.extend({
 			metaEl.textContent = shown + ' ' + _('行');
 		}
 
+		/* 两个来源并行取，合成一条时间线 */
 		function fetchLog() {
 			if (pendingFetch) return Promise.resolve();
 			pendingFetch = true;
-			return L.resolveDefault(getLog(source), {}).then(function (data) {
+			return Promise.all([
+				L.resolveDefault(getLog('product'), {}),
+				L.resolveDefault(getLog('syslog'), {}),
+			]).then(function (res) {
 				pendingFetch = false;
-				if (data && data.path) pathEl.textContent = data.path;
-				var raw = (data && data.log) || '';
-				if (paused) { lastRaw = raw; return; }
-				lastRaw = raw;
-				renderLines(raw);
+				var product = res[0] || {};
+				var syslog  = res[1] || {};
+				var paths = [product.path, syslog.path].filter(Boolean);
+				if (paths.length) pathEl.textContent = paths.join('   ·   ');
+
+				lastEntries = toEntries(product.log, syslog.log);
+				if (!paused) renderEntries(lastEntries);
 			}, function (err) {
 				pendingFetch = false;
 				renderEmpty(_('读取日志失败：%s').format(err));
 			});
 		}
 
-		/* ── 工具条 ── */
-		var srcLabel = E('span', { style: 'font-size:12px;color:var(--dy-muted);' }, [_('来源')]);
-		var srcSel = E('select', { style: [
-			'padding:3px 6px;border-radius:4px;border:1px solid var(--dy-border);',
-			'background:var(--dy-bg2);color:var(--dy-text);font-size:12px;font-family:inherit;',
-		].join('') }, [
-			E('option', { value: 'product' }, [_('产品日志 (JSONL)')]),
-			E('option', { value: 'syslog' },  [_('系统日志 (logread)')]),
-		]);
-		srcSel.addEventListener('change', function () {
-			source = srcSel.value;
-			body.innerHTML = '';
-			body.appendChild(E('div', { style: 'color:var(--dy-dim);' }, [_('加载中…')]));
-			fetchLog();
-		});
-
 		var pauseBtn   = mkToolBtn(SVG_PAUSE, _('暂停自动刷新'));
 		var sortBtn    = mkToolBtn(SVG_SORT_DESC, _('切换排序：倒序 / 正序'));
 		var refreshBtn = mkToolBtn(SVG_REFRESH, _('立即刷新'));
-		var trashBtn   = mkToolBtn(SVG_TRASH, _('清空产品日志')); 
+		var trashBtn   = mkToolBtn(SVG_TRASH, _('清空产品日志（系统日志由 logd 环形缓存管理，无法清空）'));
 
 		pauseBtn.addEventListener('click', function () {
 			paused = !paused;
 			pauseBtn.innerHTML = paused ? SVG_PLAY : SVG_PAUSE;
 			pauseBtn.title = paused ? _('继续自动刷新') : _('暂停自动刷新');
-			if (!paused && lastRaw !== null) renderLines(lastRaw);
+			if (!paused && lastEntries !== null) renderEntries(lastEntries);
 		});
 
 		sortBtn.addEventListener('click', function () {
 			newestFirst = !newestFirst;
 			sortBtn.innerHTML = newestFirst ? SVG_SORT_DESC : SVG_SORT_ASC;
-			if (lastRaw !== null) renderLines(lastRaw);
+			if (lastEntries !== null) renderEntries(lastEntries);
 		});
 
 		refreshBtn.addEventListener('click', function () { fetchLog(); });
 
 		trashBtn.addEventListener('click', function () {
-			if (!confirm(_('确定清空产品日志（current.jsonl）？'))) return;
+			if (!confirm(_('确定清空产品日志（current.jsonl）？系统日志不受影响。'))) return;
 			clearLogRpc().then(function (ok) {
 				if (!ok) { ui.addNotification(null, E('p', {}, [_('清空失败（文件不存在或无权限）')]), 'warning'); return; }
-				lastRaw = '';
-				renderLines('');
+				lastEntries = [];
+				renderEntries([]);
 			});
 		});
 
@@ -231,18 +262,18 @@ return baseclass.extend({
 			class: 'dy-log-search',
 			placeholder: _('过滤…'),
 			style: [
-				'margin-left:auto;padding:3px 8px;border-radius:4px;',
+				'padding:3px 8px;border-radius:4px;',
 				'border:1px solid var(--dy-border);background:var(--dy-bg2);color:var(--dy-text);',
 				'font-size:12px;font-family:inherit;min-width:120px;max-width:200px;',
 			].join(''),
 		});
 		searchEl.addEventListener('input', function () {
 			searchTerm = this.value.trim();
-			if (lastRaw !== null) renderLines(lastRaw);
+			if (lastEntries !== null) renderEntries(lastEntries);
 		});
 
 		var toolbar = E('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;' }, [
-			srcLabel, srcSel, pauseBtn, sortBtn, refreshBtn, trashBtn, searchEl,
+			pauseBtn, sortBtn, refreshBtn, trashBtn, searchEl,
 			E('div', { style: 'width:100%;display:flex;align-items:center;gap:10px;' }, [pathEl, metaEl]),
 		]);
 

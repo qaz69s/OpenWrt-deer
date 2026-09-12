@@ -99,38 +99,17 @@ get_mem() {
 	json_dump; json_cleanup
 }
 
-# ── 数据面前置条件体检（dae CLI） ───────────────────────────────────────────────
-get_preflight() {
-	local out
-	if [ ! -x "$CLI" ]; then
-		json_init
-		json_add_boolean 'available' '0'
-		json_add_string  'error' "诊断 CLI /usr/bin/dae 未安装"
-		json_dump; json_cleanup
-		return 0
-	fi
-	out="$("$CLI" active-datapath preflight 2>/dev/null | grep -m1 '^{')"
-	if [ -z "$out" ]; then
-		json_init
-		json_add_boolean 'available' '0'
-		json_add_string  'error' "preflight 无输出"
-		json_dump; json_cleanup
-		return 0
-	fi
-	case "$out" in
-		\{*\}) printf '%s' "$out" ;;
-		*)     json_init; json_add_boolean 'available' '0'; \
-		       json_add_string 'error' "preflight 输出无法解析"; json_dump; json_cleanup ;;
-	esac
-}
-
 # ── 日志 ──────────────────────────────────────────────────────────────────────
 get_log() {
 	local source="$1" path lines=''
 	case "$source" in
 		syslog)
-			path="logread -e $NAME"
-			lines="$(logread -e "$NAME" 2>/dev/null | tail -n "$LOG_LINES")"
+			# 过滤 deer/daed 相关行（deer[pid]、daed、procd 关于本服务的事件、
+			# 以及 LuCI 里对 /admin/services/deer 的登录等）。
+			# ⚠️ busybox 的 `logread -e` 用 POSIX 基本正则，不支持 `|` 交替
+			# （实测 `-e deer` 有结果、`-e 'deer|daed'` 恒为 0），所以这里用 grep -E。
+			path="logread | grep -iE 'deer|daed'"
+			lines="$(logread 2>/dev/null | grep -iE 'deer|daed' | tail -n "$LOG_LINES")"
 			;;
 		*)
 			source="product"
@@ -190,8 +169,7 @@ case "$1" in
 		json_add_object "setInitAction"
 			json_add_string 'name'   "name"
 			json_add_string 'action' "action"
-		json_close_object
-		json_add_object "getPreflight"; json_close_object
+			json_close_object
 		json_add_object "getLog"
 			json_add_string 'source' "source"
 		json_close_object
@@ -214,8 +192,6 @@ case "$1" in
 				read -r input; json_load "$input"
 				json_get_var action 'action'; json_cleanup
 				set_init_action "$action" ;;
-			getPreflight)
-				get_preflight ;;
 			getLog)
 				read -r input; json_load "$input"
 				json_get_var source 'source'; json_cleanup

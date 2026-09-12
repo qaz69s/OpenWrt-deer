@@ -1,32 +1,20 @@
 'use strict';
 'require view';
-'require rpc';
-'require fs';
-'require ui';
 'require view.deer.status';
-'require view.deer.config';
 'require view.deer.log';
 
-var NAME = 'deer';
-
-/* ── View 主体：控制 / 设置 / 日志 三个标签页 ── */
+/* ── View 主体：控制 / 日志 两个标签页 ── */
 return view.extend({
-	handleSaveApply: null,
-	handleSave:      null,
-	handleReset:     null,
-
 	load: function () {
 		return Promise.all([
 			L.require('view.deer.status'),
-			L.require('view.deer.config'),
 			L.require('view.deer.log'),
 		]);
 	},
 
 	render: function (mods) {
 		var statusMod = mods[0];
-		var configMod = mods[1];
-		var logMod    = mods[2];
+		var logMod    = mods[1];
 
 		/* 注入全局样式（仅一次） */
 		if (!document.getElementById('deer-global-style')) {
@@ -37,7 +25,6 @@ return view.extend({
 				'--dy-bg:#2a2a2a;',
 				'--dy-bg2:#333333;',
 				'--dy-bg3:#3a3a3a;',
-				'--dy-editor-bg:#2a2a2a;',
 				'--dy-border:#444444;',
 				'--dy-text:#e8e8e8;',
 				'--dy-title:#ffffff;',
@@ -53,7 +40,6 @@ return view.extend({
 				'--dy-bg:#ffffff;',
 				'--dy-bg2:#f5f6f8;',
 				'--dy-bg3:#eaecef;',
-				'--dy-editor-bg:#f8f9fa;',
 				'--dy-border:#d0d2d8;',
 				'--dy-text:#1a1a1a;',
 				'--dy-title:#000000;',
@@ -109,18 +95,6 @@ return view.extend({
 				'@media(max-width:640px){.dy-metrics{grid-template-columns:1fr 1fr !important;}}',
 				'@media(max-width:480px){.dy-card{padding:12px;} .dy-nav{margin-bottom:12px;} .dy-tab{padding:9px 12px !important;font-size:13px !important;}}',
 
-				'.dy-gate{',
-				'display:inline-flex;align-items:center;gap:5px;',
-				'padding:3px 9px;border-radius:12px;font-size:11px;font-weight:600;',
-				'font-family:"SFMono-Regular",Consolas,Menlo,monospace;',
-				'}',
-
-				/* LuCI 原生表单在自定义卡片内的观感收敛 */
-				'.dy-card .cbi-section, .dy-card .cbi-map{color:var(--dy-text);}',
-				'.dy-card .cbi-map-descr, .dy-card .cbi-section-descr, .dy-card .cbi-value-description{color:var(--dy-muted);}',
-				'.dy-card h3, .dy-card legend{color:var(--dy-title);}',
-				'.dy-card .cbi-input-text, .dy-card .cbi-input-select{max-width:320px;}',
-
 				'.dy-log-body::-webkit-scrollbar{width:7px;height:7px;}',
 				'.dy-log-body::-webkit-scrollbar-track{background:var(--dy-bg2);border-radius:4px;}',
 				'.dy-log-body::-webkit-scrollbar-thumb{background:var(--dy-scroll-thumb);border-radius:4px;}',
@@ -133,14 +107,12 @@ return view.extend({
 
 		var tabs = [
 			{ label: _('控制'), fn: function () { return statusMod.render(); } },
-			{ label: _('设置'), fn: function () { return configMod.render(); } },
 			{ label: _('日志'), fn: function () { return logMod.render(); }, lazy: true, isLog: true },
 		];
 
-		var navBtns     = [];
-		var tabPanels   = [];
-		var logPanel    = null;
-		var statusPanel = null;
+		var navBtns   = [];
+		var tabPanels = [];
+		var logPanel  = null;
 
 		tabs.forEach(function (t, i) {
 			var isFirst = (i === 0);
@@ -148,14 +120,12 @@ return view.extend({
 			var panel   = E('div', { style: 'display:' + (isFirst ? 'block' : 'none') + ';' },
 				(isFirst || !t.lazy) ? [t.fn()] : []);
 
-			if (i === 0) statusPanel = panel.firstChild || null;
 			if (t.isLog && !t.lazy) logPanel = panel.firstChild || null;
 
 			var btn = E('button', { class: 'dy-tab' + (isFirst ? ' dy-active' : '') }, [t.label]);
 
 			btn.addEventListener('click', function () {
-				if (logPanel    && logPanel._setVisible)    logPanel._setVisible(false);
-				if (statusPanel && statusPanel._setVisible) statusPanel._setVisible(false);
+				if (logPanel && logPanel._setVisible) logPanel._setVisible(false);
 
 				navBtns.forEach(function (b)  { b.classList.remove('dy-active'); });
 				tabPanels.forEach(function (p) { p.style.display = 'none'; });
@@ -168,12 +138,10 @@ return view.extend({
 					if (node) {
 						panel.appendChild(node);
 						if (t.isLog) logPanel = node;
-						if (i === 0) statusPanel = node;
 					}
 				}
 
 				if (t.isLog && logPanel && logPanel._setVisible) logPanel._setVisible(true);
-				if (i === 0 && statusPanel && statusPanel._setVisible) statusPanel._setVisible(true);
 			});
 
 			navBtns.push(btn);

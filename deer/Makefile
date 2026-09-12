@@ -147,6 +147,10 @@ define Package/deer/prerm
 		/etc/init.d/deer stop    2>/dev/null || true
 		/etc/init.d/deer disable 2>/dev/null || true
 	}
+	# 清理 geodata 兜底软链（仅当仍指向本包依赖的 v2ray geodata 时）
+	[ "$$(readlink /usr/share/daed/geoip.dat 2>/dev/null)" = "../v2ray/geoip.dat" ] && rm -f /usr/share/daed/geoip.dat
+	[ "$$(readlink /usr/share/daed/geosite.dat 2>/dev/null)" = "../v2ray/geosite.dat" ] && rm -f /usr/share/daed/geosite.dat
+	rmdir /usr/share/daed 2>/dev/null || true
 }
 exit 0
 endef

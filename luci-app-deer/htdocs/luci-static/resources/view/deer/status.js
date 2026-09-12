@@ -9,21 +9,11 @@ var SVG_PLAY    = '<svg viewBox="0 0 16 16" width="13" height="13" fill="current
 var SVG_RESTART = '<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" style="vertical-align:middle"><path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>';
 var SVG_STOP    = '<svg viewBox="0 0 16 16" width="11" height="11" fill="currentColor" style="vertical-align:middle"><rect x="2.5" y="2.5" width="11" height="11" rx="1"/></svg>';
 var SVG_PANEL   = '<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" style="vertical-align:middle"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>';
-var SVG_CHECK   = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><polyline points="2.5 8.5 6 12 13.5 4.5"/></svg>';
 var SVG_SPINNER = '<svg class="dy-spin" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" style="vertical-align:middle"><circle cx="8" cy="8" r="5.5" stroke-opacity=".18"/><path d="M8 2.5A5.5 5.5 0 0 1 13.5 8"/></svg>';
 
 /* ── RPC ── */
 var getInitStatus = rpc.declare({ object: 'luci.' + NAME, method: 'getInitStatus', params: ['name'] });
 var setInitAction = rpc.declare({ object: 'luci.' + NAME, method: 'setInitAction', params: ['name', 'action'], expect: { result: false } });
-var getPreflight  = rpc.declare({ object: 'luci.' + NAME, method: 'getPreflight' });
-
-var GATE_LABEL = {
-	root:                    'root 权限',
-	bpffs:                   'bpffs (BPF 文件系统)',
-	kernel_feature_version:  '内核特性版本',
-	memlock:                 'memlock 限制',
-	netns_permission:        'netns 权限',
-};
 
 return baseclass.extend({
 	render: function () {
@@ -46,7 +36,7 @@ return baseclass.extend({
 			statusBadge,
 		]);
 		var subtitle = E('div', { style: 'font-size:12px;font-weight:500;color:var(--dy-muted);margin-bottom:20px;' }, [
-			_('DaeNext（Rust 原生 daed）—— dae 内核 + 产品层（REST API / Web UI / SQLite 状态）。'),
+			_('基于 Rust eBPF 的高性能透明代理解决方案（DaeNext 引擎）。'),
 		]);
 
 		/* ── 指标格子 ── */
@@ -72,86 +62,6 @@ return baseclass.extend({
 			mkMetric(_('运行时间'), uptimeEl, SVG_UPTIME_ICON),
 			mkMetric(_('引擎版本'), versionEl, SVG_KERNEL_ICON),
 		]);
-
-		/* ── 数据面前置条件（dae active-datapath preflight） ── */
-		var gateRow   = E('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;' });
-		var preflightNote = E('div', { style: 'font-size:11px;color:var(--dy-muted);margin-top:8px;line-height:1.7;' }, ['—']);
-
-		var preflightBtn = E('button', { type: 'button', style: [
-			'display:inline-flex;align-items:center;gap:5px;',
-			'padding:4px 11px;border:1px solid var(--dy-border);border-radius:5px;',
-			'background:transparent;color:var(--dy-muted);cursor:pointer;',
-			'font-size:12px;font-family:inherit;font-weight:500;',
-			'transition:background .12s,color .12s;opacity:.45;',
-		].join('') });
-		preflightBtn._svg   = SVG_CHECK;
-		preflightBtn._label = _('重新体检');
-		preflightBtn.innerHTML = SVG_CHECK + ' ' + preflightBtn._label;
-		preflightBtn.addEventListener('mouseenter', function () {
-			if (preflightBtn.disabled) return;
-			preflightBtn.style.background = 'rgba(128,128,128,.12)';
-			preflightBtn.style.color = 'var(--dy-text)';
-		});
-		preflightBtn.addEventListener('mouseleave', function () {
-			preflightBtn.style.background = 'transparent';
-			preflightBtn.style.color = 'var(--dy-muted)';
-		});
-
-		var preflightSection = E('div', { style: 'margin-bottom:16px;' }, [
-			E('div', { style: 'display:flex;align-items:center;gap:10px;margin-bottom:8px;' }, [
-				E('div', { style: 'font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--dy-muted);' }, [_('数据面前置条件')]),
-				preflightBtn,
-			]),
-			gateRow,
-			preflightNote,
-		]);
-
-		function renderPreflight(data) {
-			while (gateRow.firstChild) gateRow.removeChild(gateRow.firstChild);
-
-			if (!data || data.available === false || (!data.gates && data.error)) {
-				gateRow.appendChild(E('span', { style: 'font-size:12px;color:var(--dy-muted);' },
-					[_('不可用：%s').format((data && data.error) || _('未知错误'))]));
-				preflightNote.textContent = '';
-				return;
-			}
-
-			var gates = data.gates || {};
-			Object.keys(gates).forEach(function (k) {
-				var ok = !!gates[k];
-				gateRow.appendChild(E('span', {
-					class: 'dy-gate',
-					style: 'background:' + (ok ? 'rgba(39,174,96,.15)' : 'rgba(192,57,43,.15)') + ';' +
-						'color:' + (ok ? '#62c462' : '#e87370') + ';',
-				}, [ (ok ? '✓ ' : '✗ ') + (GATE_LABEL[k] || k) ]));
-			});
-
-			var allowed = data.allowed;
-			var notes = [
-				allowed ? _('数据面可加载 ✓') : _('数据面当前不可加载 ✗'),
-				data.tproxy_port ? 'tproxy=' + data.tproxy_port : '',
-			].filter(Boolean);
-			preflightNote.textContent = notes.join('   ·   ');
-			preflightNote.style.color = allowed ? '#62c462' : '#e87370';
-		}
-
-		function refreshPreflight() {
-			preflightBtn.disabled = true;
-			preflightBtn.style.opacity = '.6';
-			preflightBtn.innerHTML = SVG_SPINNER + ' ' + preflightBtn._label;
-			return L.resolveDefault(getPreflight(), {}).then(function (data) {
-				renderPreflight(data);
-				preflightBtn.disabled = false;
-				preflightBtn.style.opacity = '1';
-				preflightBtn.innerHTML = preflightBtn._svg + ' ' + preflightBtn._label;
-			}, function (err) {
-				renderPreflight({ available: false, error: String(err) });
-				preflightBtn.disabled = false;
-				preflightBtn.style.opacity = '1';
-				preflightBtn.innerHTML = preflightBtn._svg + ' ' + preflightBtn._label;
-			});
-		}
-		preflightBtn.addEventListener('click', refreshPreflight);
 
 		/* ── 分割线 ── */
 		var divider = E('hr', { style: 'border:none;border-top:1px solid var(--dy-border);margin:0 0 16px;' });
@@ -231,7 +141,7 @@ return baseclass.extend({
 			btnRow,
 		]);
 
-		var card = E('div', {}, [titleRow, subtitle, metrics, preflightSection, divider, serviceSection, ctrlSection]);
+		var card = E('div', {}, [titleRow, subtitle, metrics, divider, serviceSection, ctrlSection]);
 
 		/* ── Uptime ── */
 		var uptimeTimer = null, uptimeAnchor = 0;
@@ -423,7 +333,6 @@ return baseclass.extend({
 			}, function () { statusPending = false; });
 		}
 		refresh();
-		refreshPreflight();
 
 		// 自管理轮询：不依赖 LuCI poll 模块
 		var autoTimer = setInterval(function () {

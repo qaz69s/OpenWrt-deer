@@ -6,7 +6,6 @@
 				"luci.deer": [
 					"getInitStatus",
 					"getMem",
-					"getPreflight",
 					"getLog"
 				]
 			},
@@ -17,14 +16,8 @@
 				"luci.deer": [
 					"setInitAction",
 					"clearLog"
-				],
-				"uci": [
-					"get",
-					"set",
-					"commit"
 				]
-			},
-			"uci": [ "deer" ]
+			}
 		}
 	}
 }

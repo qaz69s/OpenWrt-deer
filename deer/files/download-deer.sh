@@ -103,6 +103,9 @@ if [ "$DEER_WITH_WEB" = "1" ]; then
 	}
 	WEB_ASSET="daed-web-${DEER_WEB_VERSION}.tar.gz"
 	fetch "$BASE_URL/$WEB_ASSET" "$DL_DIR/$WEB_ASSET"
+	# Web UI 资产也纳入 SHA256SUMS 校验：上游若重新发布同名资产（内容变了），
+	# 本地 dl/ 的旧缓存会被这里拦下，而不是把旧面板打进包。
+	verify_sum "$DL_DIR/$WEB_ASSET" "$WEB_ASSET"
 	rm -rf "$PKG_BUILD_DIR/web"
 	mkdir -p "$PKG_BUILD_DIR/web"
 	if ! tar -xzf "$DL_DIR/$WEB_ASSET" -C "$PKG_BUILD_DIR/web" --strip-components=1; then

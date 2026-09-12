@@ -6,7 +6,7 @@ Deer 是 **DaeNext**（Rust 原生 dae：dae 内核 + 产品层）的 OpenWrt �
 - `deer/` —— 守护进程包：从 [qaz69s/DaeNext](https://github.com/qaz69s/DaeNext/releases)
   取预编译 **musl 静态二进制**，装 `/usr/bin/daed`（守护进程）与 `/usr/bin/dae`（诊断 CLI），
   附 procd init + UCI 配置
-- `luci-app-deer/` —— LuCI 界面：控制 / 设置 / 日志 三个标签页
+- `luci-app-deer/` —— LuCI 界面：控制 / 日志 两个标签页（服务管理 + 日志查看，不做配置编辑）
 
 ## 与 horse 的关键区别：配置在哪
 
@@ -15,11 +15,11 @@ Deer 是 **DaeNext**（Rust 原生 dae：dae 内核 + 产品层）的 OpenWrt �
 | 引擎 | honk（Rust，Go 版 dae 的重写） | DaeNext（Rust 原生 dae + 产品层） |
 | 代理配置载体 | `/etc/horse/config.dae`（文本文件） | `daed.db`（SQLite），经 **Web UI / REST API** 改写 |
 | 配置入口 | LuCI 内置 `.dae` 编辑器 | daed 面板（`http://<路由器>:2023/`） |
-| LuCI 的角色 | 编辑器 + 服务管理 | 服务管理 + 数据面体检 + 日志（不改代理配置） |
+| LuCI 的角色 | 编辑器 + 服务管理 | 服务管理 + 日志（不改代理配置） |
 
 `daed run -c <路径>` 的 `-c` **必须是目录**（传 `.dae` 文件会被直接拒绝：
-`config directory ... must be a directory`），配置实体存在状态库里，所以 Deer 的
-「设置」页只放运行时参数，节点/订阅/路由/DNS 全部在 daed 面板里配。
+`config directory ... must be a directory`），配置实体存在状态库里：节点/订阅/路由/DNS
+全部在 daed 面板里配，运行时参数走 UCI（见下），LuCI 侧不再提供设置页。
 
 ## 安装
 
@@ -63,7 +63,7 @@ make package/luci-app-deer/compile V=s
 | `daed-<arch>-musl`（`aarch64`/`x86_64`） | 守护进程 → `/usr/bin/daed` |
 | `dae-<arch>-musl` | 诊断 CLI → `/usr/bin/dae` |
 | `daed-web-<版本>.tar.gz`（内含 `dist/` 前缀） | Web UI → `/usr/share/deer/web/` |
-| `SHA256SUMS`（可选） | 存在则强校验两个二进制 |
+| `SHA256SUMS`（可选） | 存在则强校验二进制 **与 Web UI 资产**；本地缓存与校验和不一致时自动丢弃重下 |
 
 `DEER_VERSION` 默认 `latest`（每次构建查 GitHub 最新 release，失败回退 `v3.1.0-musl`）；
 可锁版：`make package/deer/compile DEER_VERSION=v3.1.0-musl`。
@@ -89,7 +89,7 @@ make package/deer/compile DEER_WITH_CLI=0   # 不装 /usr/bin/dae（见下方冲
 | `+kmod-veth` | 数据面 netns 的 veth 对（`dae50cli0` / `dae50lan0`） |
 | `+kmod-xdp-sockets-diag` | socket 诊断（与 joey 同款前置） |
 | `+ca-bundle` | 订阅下载 TLS 根证书 |
-| `+v2ray-geoip +v2ray-geosite` | `/usr/share/deer/{geoip,geosite}.dat` 软链目标（daed 要求它们位于 `web_root` 的**父目录**） |
+| `+v2ray-geoip +v2ray-geosite` | geodata 软链目标：`/usr/share/deer/{geoip,geosite}.dat`（init 通过 `DAE_LOCATION_ASSET` 传给 daed）与 `/usr/share/daed/*.dat`（daed 默认搜索目录兜底） |
 
 架构限制 `@(aarch64||x86_64)`：上游只发布了这两个 musl 目标。
 
@@ -102,7 +102,8 @@ make package/deer/compile DEER_WITH_CLI=0   # 不装 /usr/bin/dae（见下方冲
 /etc/config/deer                     UCI
 /etc/init.d/deer                     procd 服务
 /usr/share/deer/web/                 daed 面板（Web UI）
-/usr/share/deer/{geoip,geosite}.dat  软链 → /usr/share/v2ray/
+/usr/share/deer/{geoip,geosite}.dat  软链 → /usr/share/v2ray/（DAE_LOCATION_ASSET 指向这里）
+/usr/share/daed/{geoip,geosite}.dat  同上，daed 默认搜索目录的兜底
 /tmp/log/deer/current.jsonl          产品日志（JSONL）
 /run/daed/control.sock              控制面 IPC（daed 固定默认路径）
 ```
@@ -111,7 +112,7 @@ make package/deer/compile DEER_WITH_CLI=0   # 不装 /usr/bin/dae（见下方冲
 
 `joey` 包（Go 版 dae）也安装 `/usr/bin/dae`，与 Deer 的 CLI 撞路径。同一设备上两者
 不能同时装（apk 会报文件冲突）。只装一个，或用 `DEER_WITH_CLI=0` 构建 Deer
-——此时 LuCI「控制」页的数据面体检会显示 CLI 未安装（其余功能不受影响）。
+——此时 `dae` 诊断命令不可用，服务与面板本身（`daed`）不受影响。
 
 ## UCI
 
@@ -120,7 +121,8 @@ make package/deer/compile DEER_WITH_CLI=0   # 不装 /usr/bin/dae（见下方冲
 | `config_dir` | `/etc/deer` | 配置目录（daed.db 所在） |
 | `state` | `/etc/deer/daed.db` | 产品状态库 |
 | `listen` | `0.0.0.0:2023` | REST API + Web UI；改 `127.0.0.1:2023` 则仅本机可管理 |
-| `web_root` | `/usr/share/deer/web` | 面板静态文件；geodata 在其父目录 |
+| `web_root` | `/usr/share/deer/web` | 面板静态文件目录（geodata 默认取其父目录） |
+| `geodata_dir` | （空） | geoip.dat / geosite.dat 所在目录；留空 = `web_root` 的父目录。该目录会以 `DAE_LOCATION_ASSET` 传给 daed |
 | `log_dir` | `/tmp/log/deer` | 产品日志目录 |
 | `http_profile` | `low-memory` | HTTP worker 档位（low-memory / balanced / performance） |
 | `api_only` | `0` | 仅控制面，不加载数据面 |
@@ -135,12 +137,12 @@ UCI 标志静默拦掉。
 
 ## LuCI 界面
 
-- **控制**：运行状态 / 引擎版本 / 内存 / 运行时间；`dae active-datapath preflight`
-  数据面体检（root、bpffs、kernel_feature_version、memlock、netns_permission 五项门禁 +
-  tproxy 端口）；开机自启开关；启动 / 重启 / 停止；「面板」按钮直达 daed Web UI
-- **设置**：上表 UCI 参数（保存并应用后自动重启已运行的服务）
-- **日志**：产品日志（JSONL，解析成 `时间 等级 消息 key=value`）与系统日志（`logread -e deer`）
-  双来源，支持过滤 / 暂停 / 倒序 / 清空
+- **控制**：运行状态 / 引擎版本 / 内存 / 运行时间；开机自启开关；启动 / 重启 / 停止；
+  「面板」按钮直达 daed Web UI
+- **日志**：产品日志（JSONL）与系统日志（`logread`，按 `deer|daed` 过滤）**合并成一条时间线**，
+  按时间排序；产品日志行解析成 `时间 等级 消息 key=value`，系统日志行把 `facility.level`
+  映射成同款等级标签并带淡色 `sys` 来源标记；支持过滤 / 暂停 / 倒序 / 清空
+  （清空只作用于产品日志，logd 环形缓存清不掉）
 
 命令行等价操作：
 

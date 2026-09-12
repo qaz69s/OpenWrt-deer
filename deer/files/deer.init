@@ -115,6 +115,13 @@ start_service() {
 	mkdir -p "$config_dir" "$log_dir" "$web_root" /run/daed
 	chmod 0700 "$config_dir" /run/daed 2>/dev/null || true
 
+	# 崩溃/断电后残留的控制 socket 会让 daed 拒绝启动
+	# （"control socket is already accepting connections"）。仅在确认没有
+	# daed 在跑时清理，避免误删正在运行实例的 socket。
+	if [ -S /run/daed/control.sock ] && ! pidof daed >/dev/null 2>&1; then
+		rm -f /run/daed/control.sock
+	fi
+
 	if [ "$validate_start" = "1" ]; then
 		validate_deer_config || return 1
 	fi
@@ -124,10 +131,13 @@ start_service() {
 
 	procd_open_instance
 	procd_set_param command "$PROG" run
-	[ "$config_dir" = "$DEFAULT_CONFIG_DIR" ] || procd_append_param command -c "$config_dir"
-	[ "$state" = "$config_dir/daed.db" ] || procd_append_param command --state "$state"
-	[ "$listen" = "$DEFAULT_LISTEN" ] || procd_append_param command --listen "$listen"
-	[ "$web_root" = "$DEFAULT_WEB_ROOT" ] || procd_append_param command --web-root "$web_root"
+	# ⚠️ 始终显式传参：上游 daed.init 是「与默认值相同就省略」，但 daed 的编译内置
+	# 默认路径是 /etc/daed 与 /usr/share/daed/web，与 deer 的 /etc/deer 不同 ——
+	# 一旦省略 -c，daed 会去读 /etc/daed，与 validate 校验的目录不一致。
+	procd_append_param command -c "$config_dir"
+	procd_append_param command --state "$state"
+	procd_append_param command --listen "$listen"
+	procd_append_param command --web-root "$web_root"
 
 	if [ "$api_only" = "1" ]; then
 		procd_append_param command --api-only

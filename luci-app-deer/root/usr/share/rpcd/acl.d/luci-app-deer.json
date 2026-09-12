@@ -1,0 +1,30 @@
+{
+	"luci-app-deer": {
+		"description": "Grant UCI and ubus access to LuCI app Deer",
+		"read": {
+			"ubus": {
+				"luci.deer": [
+					"getInitStatus",
+					"getMem",
+					"getPreflight",
+					"getLog"
+				]
+			},
+			"uci": [ "deer" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.deer": [
+					"setInitAction",
+					"clearLog"
+				],
+				"uci": [
+					"get",
+					"set",
+					"commit"
+				]
+			},
+			"uci": [ "deer" ]
+		}
+	}
+}

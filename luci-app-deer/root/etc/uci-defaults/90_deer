@@ -1,0 +1,29 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# uci-defaults: luci-app-deer 首次安装初始化
+# deer 包已经装好 /etc/init.d/deer、/etc/config/deer、/usr/bin/daed；
+# 这里只处理权限、目录、软链与自启。
+
+# rpcd helper 权限（个别构建里安装后可能不是 755）
+chmod 0755 /usr/libexec/rpcd/luci.deer 2>/dev/null || true
+
+# daed 配置目录：仅 root 可读（内含 daed.db 与配置快照）
+mkdir -p /etc/deer
+chmod 0700 /etc/deer 2>/dev/null || true
+
+# 产品日志目录（/tmp 是 tmpfs，重启即清空）
+mkdir -p /tmp/log/deer
+
+# geodata 软链（daed 要求 geoip/geosite 位于 web_root 的父目录）
+mkdir -p /usr/share/deer
+ln -sf ../v2ray/geoip.dat   /usr/share/deer/geoip.dat   2>/dev/null || true
+ln -sf ../v2ray/geosite.dat /usr/share/deer/geosite.dat 2>/dev/null || true
+
+# 让 rpcd 立刻加载新的 ACL / helper
+/etc/init.d/rpcd restart
+
+# 自启（不在安装时启动服务；由用户从 LuCI 点启动，或重启后随 rc.d 启动）
+/etc/init.d/deer enable 2>/dev/null || true
+
+return 0

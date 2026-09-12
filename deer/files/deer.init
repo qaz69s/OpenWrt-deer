@@ -1,0 +1,192 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Deer —— DaeNext (daed) Rust 原生 eBPF 透明代理，procd 服务脚本
+#
+# 自启由 /etc/rc.d/S95deer 软链决定（LuCI「开机自启」开关 = enable/disable）。
+# 这里刻意不检查 UCI enabled 选项：那会让 LuCI 的「启动」按钮静默失效
+# （setInitAction('start') 直接调用 start_service，不会先改 UCI 标志）。
+
+START=95
+STOP=10
+USE_PROCD=1
+
+NAME=deer
+PROG="${DEER_PROG:-/usr/bin/daed}"
+CLI="${DEER_CLI:-/usr/bin/dae}"
+DEFAULT_CONFIG_DIR=/etc/deer
+DEFAULT_LISTEN=0.0.0.0:2023
+DEFAULT_WEB_ROOT=/usr/share/deer/web
+DEFAULT_LOG_DIR=/tmp/log/deer
+GEOIP=/usr/share/deer/geoip.dat
+GEOSITE=/usr/share/deer/geosite.dat
+RESOLV_DEER=/tmp/resolv.conf.deer
+
+EXTRA_COMMANDS="hot_reload"
+EXTRA_HELP="        hot_reload   Reload daed runtime config (daed reload + wait-ready)"
+
+load_deer_config() {
+	config_load "$NAME"
+
+	config_get config_dir main config_dir "$DEFAULT_CONFIG_DIR"
+	config_get state main state "$config_dir/daed.db"
+	config_get listen main listen "$DEFAULT_LISTEN"
+	config_get web_root main web_root "$DEFAULT_WEB_ROOT"
+	config_get log_dir main log_dir "$DEFAULT_LOG_DIR"
+	config_get_bool api_only main api_only 0
+
+	config_get_bool validate_start main validate_start 1
+	config_get_bool validate_reload main validate_reload 1
+	config_get_bool hijack_resolv main hijack_resolv 0
+	config_get term_timeout main term_timeout 10
+
+	config_get_bool respawn main respawn 1
+	config_get respawn_threshold main respawn_threshold 3600
+	config_get respawn_timeout main respawn_timeout 5
+	config_get respawn_retry main respawn_retry 5
+
+	config_get nofile main nofile 1048576
+	config_get nproc main nproc 512
+
+	config_get http_profile main http_profile "low-memory"
+	config_get resident_runtime_profile main resident_runtime_profile ""
+	config_get http_workers main http_workers ""
+	config_get http_queue main http_queue ""
+	config_get worker_stack_bytes main worker_stack_bytes ""
+}
+
+validate_deer_config() {
+	"$PROG" validate -c "$config_dir" --state "$state"
+}
+
+validate_deer_runtime_config() {
+	"$PROG" validate -c "$config_dir" --state "$state" --runtime
+}
+
+# geoip.dat / geosite.dat 必须是 web_root 的父目录（daed 的 geodata_dir_for_web_root）
+ensure_geodata() {
+	[ -f "$GEOIP" ]   || ln -sf ../v2ray/geoip.dat   "$GEOIP"   2>/dev/null
+	[ -f "$GEOSITE" ] || ln -sf ../v2ray/geosite.dat "$GEOSITE" 2>/dev/null
+}
+
+# 可选：把 /tmp/resolv.conf 指向 daed 的 DNS（默认关闭）
+# 打开后路由器自身 DNS 走 daed，配置不当会导致全机解析失败 —— 谨慎开启
+hijack_resolv_conf() {
+	[ "$hijack_resolv" = "1" ] || return 0
+	grep -q ' /tmp/resolv\.conf ' /proc/mounts && return 0
+
+	grep -E '^(search|domain) ' /tmp/resolv.conf >"$RESOLV_DEER" 2>/dev/null
+
+	local dns_list LOGICAL_WAN
+	. /lib/functions/network.sh
+	network_find_wan LOGICAL_WAN 2>/dev/null
+	if [ -n "$LOGICAL_WAN" ]; then
+		dns_list=$(ubus call "network.interface.$LOGICAL_WAN" status 2>/dev/null | \
+			jsonfilter -e '@["dns-server"][*]' 2>/dev/null)
+	fi
+	if [ -z "$dns_list" ] && [ -f "/tmp/resolv.conf.d/resolv.conf.auto" ]; then
+		dns_list=$(awk '/^nameserver/{print $2}' "/tmp/resolv.conf.d/resolv.conf.auto")
+	fi
+	[ -z "$dns_list" ] && dns_list="119.29.29.29 223.5.5.5"
+
+	for dns in $dns_list; do
+		echo "nameserver $dns" >>"$RESOLV_DEER"
+	done
+
+	mount --bind "$RESOLV_DEER" /tmp/resolv.conf
+	mount -o remount,ro,bind /tmp/resolv.conf
+}
+
+restore_resolv_conf() {
+	grep -q ' /tmp/resolv\.conf ' /proc/mounts || return 0
+	mount -o remount,rw,bind /tmp/resolv.conf 2>/dev/null
+	umount /tmp/resolv.conf 2>/dev/null
+	rm -f "$RESOLV_DEER"
+}
+
+start_service() {
+	load_deer_config
+
+	[ -x "$PROG" ] || {
+		echo "$PROG not found or not executable (install package deer first)"
+		return 1
+	}
+
+	mkdir -p "$config_dir" "$log_dir" "$web_root" /run/daed
+	chmod 0700 "$config_dir" /run/daed 2>/dev/null || true
+
+	if [ "$validate_start" = "1" ]; then
+		validate_deer_config || return 1
+	fi
+
+	hijack_resolv_conf || return 1
+	ensure_geodata
+
+	procd_open_instance
+	procd_set_param command "$PROG" run
+	[ "$config_dir" = "$DEFAULT_CONFIG_DIR" ] || procd_append_param command -c "$config_dir"
+	[ "$state" = "$config_dir/daed.db" ] || procd_append_param command --state "$state"
+	[ "$listen" = "$DEFAULT_LISTEN" ] || procd_append_param command --listen "$listen"
+	[ "$web_root" = "$DEFAULT_WEB_ROOT" ] || procd_append_param command --web-root "$web_root"
+
+	if [ "$api_only" = "1" ]; then
+		procd_append_param command --api-only
+	fi
+
+	procd_set_param env PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+	procd_append_param env DAED_PRODUCT_LOG_DIR="$log_dir"
+	procd_append_param env NO_COLOR=1
+	[ -n "$http_profile" ] && procd_append_param env HTTP_PROFILE="$http_profile"
+	[ -n "$resident_runtime_profile" ] && procd_append_param env RESIDENT_RUNTIME_PROFILE="$resident_runtime_profile"
+	[ -n "$http_workers" ] && procd_append_param env HTTP_WORKERS="$http_workers"
+	[ -n "$http_queue" ] && procd_append_param env HTTP_QUEUE="$http_queue"
+	[ -n "$worker_stack_bytes" ] && procd_append_param env HTTP_WORKER_STACK_BYTES="$worker_stack_bytes"
+
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param term_timeout "$term_timeout"
+	procd_set_param limits nofile="$nofile $nofile" nproc="$nproc $nproc"
+
+	if [ "$respawn" = "1" ]; then
+		procd_set_param respawn "$respawn_threshold" "$respawn_timeout" "$respawn_retry"
+	fi
+
+	procd_close_instance
+}
+
+stop_service() {
+	restore_resolv_conf
+}
+
+reload_service() {
+	load_deer_config
+
+	[ -x "$PROG" ] || {
+		echo "$PROG not found or not executable"
+		return 1
+	}
+
+	if [ "$validate_reload" = "1" ]; then
+		validate_deer_runtime_config || return 1
+	fi
+
+	hijack_resolv_conf || return 1
+	"$PROG" reload && return 0
+	local reload_status=$?
+
+	if "$PROG" wait-ready --timeout 2s >/dev/null 2>&1; then
+		return "$reload_status"
+	fi
+
+	echo "daed reload left the runtime unavailable; restarting the service"
+	restart || return 1
+	"$PROG" wait-ready --timeout 30s
+}
+
+service_triggers() {
+	procd_add_reload_trigger "$NAME"
+}
+
+hot_reload() {
+	reload_service
+}

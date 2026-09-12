@@ -1,0 +1,226 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# rpcd helper for luci-app-deer
+#
+# ubus -v list luci.deer
+# ubus call luci.deer getInitStatus '{"name":"deer"}'
+
+readonly NAME="deer"
+readonly PROG="/usr/bin/daed"
+readonly CLI="/usr/bin/dae"
+readonly DEFAULT_LOG_DIR="/tmp/log/deer"
+readonly LOG_LINES=400
+
+. /lib/functions.sh
+. /usr/share/libubox/jshn.sh
+
+is_enabled()      { "/etc/init.d/${1}" enabled >/dev/null 2>&1; }
+is_running()      { [ "$(ubus call service list "{ 'name': '$1' }" \
+                        | jsonfilter -q -e "@['$1'].instances[*].running" \
+                        | uniq)" = 'true' ]; }
+print_json_bool() { json_init; json_add_boolean "$1" "$2"; json_dump; json_cleanup; }
+
+get_version() {
+	[ -x "$PROG" ] || { echo ''; return 0; }
+	"$PROG" --version 2>/dev/null | awk 'NR==1{print $4}'
+}
+
+_get_daed_pid() {
+	local pid
+	pid="$(pidof daed 2>/dev/null | awk '{print $1}')"
+	[ -z "$pid" ] && pid="$(ps 2>/dev/null | awk '$0~/[d]aed run/{print $1; exit}')"
+	echo "$pid"
+}
+
+uci_get() {
+	local v
+	v="$(uci -q get "deer.main.$1")"
+	[ -n "$v" ] && echo "$v"
+}
+
+log_dir() {
+	local d
+	d="$(uci_get log_dir)"
+	echo "${d:-$DEFAULT_LOG_DIR}"
+}
+
+# ── 状态 ──────────────────────────────────────────────────────────────────────
+get_proc_uptime() {
+	local pid="${1:-$(_get_daed_pid)}"
+	[ -z "$pid" ] && { echo 0; return; }
+	local starttime sys_uptime
+	starttime="$(awk '{print $22}' /proc/"$pid"/stat 2>/dev/null)"
+	sys_uptime="$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null)"
+	[ -z "$starttime" ] || [ -z "$sys_uptime" ] && { echo 0; return; }
+	echo $(( sys_uptime - starttime / 100 ))
+}
+
+get_proc_mem_mb() {
+	local pid="${1:-$(_get_daed_pid)}"
+	[ -z "$pid" ] && { echo 0; return; }
+	awk '/VmRSS/{printf "%.1f", $2/1024; exit}' /proc/"$pid"/status 2>/dev/null || echo 0
+}
+
+get_init_status() {
+	local name="${1:-$NAME}"
+	local version running=0 uptime=0 mem=0
+	version="$(get_version)"
+	is_running "$name" && running=1
+	if [ "$running" = "1" ]; then
+		local pid; pid="$(_get_daed_pid)"
+		uptime="$(get_proc_uptime "$pid")"
+		mem="$(get_proc_mem_mb "$pid")"
+	fi
+
+	json_init
+	json_add_object "$name"
+	if is_enabled "$name"; then json_add_boolean 'enabled' '1'
+	else                        json_add_boolean 'enabled' '0'; fi
+	json_add_boolean 'running'   "$running"
+	json_add_string  'version'   "$version"
+	[ -n "$version" ] && json_add_boolean 'installed' '1' || json_add_boolean 'installed' '0'
+	json_add_int     'uptime'    "${uptime:-0}"
+	json_add_string  'mem'       "${mem:-0}"
+	json_add_string  'listen'    "$(uci_get listen)"
+	json_add_string  'web_root'  "$(uci_get web_root)"
+	json_add_string  'log_dir'   "$(log_dir)"
+	[ -x "$CLI" ] && json_add_boolean 'cli' '1' || json_add_boolean 'cli' '0'
+	json_close_object
+	json_dump; json_cleanup
+}
+
+get_mem() {
+	local pid mem
+	pid="$(_get_daed_pid)"
+	[ -n "$pid" ] && mem="$(get_proc_mem_mb "$pid")"
+	json_init
+	json_add_string 'mem' "${mem:-0}"
+	json_dump; json_cleanup
+}
+
+# ── 数据面前置条件体检（dae CLI） ───────────────────────────────────────────────
+get_preflight() {
+	local out
+	if [ ! -x "$CLI" ]; then
+		json_init
+		json_add_boolean 'available' '0'
+		json_add_string  'error' "诊断 CLI /usr/bin/dae 未安装"
+		json_dump; json_cleanup
+		return 0
+	fi
+	out="$("$CLI" active-datapath preflight 2>/dev/null | grep -m1 '^{')"
+	if [ -z "$out" ]; then
+		json_init
+		json_add_boolean 'available' '0'
+		json_add_string  'error' "preflight 无输出"
+		json_dump; json_cleanup
+		return 0
+	fi
+	case "$out" in
+		\{*\}) printf '%s' "$out" ;;
+		*)     json_init; json_add_boolean 'available' '0'; \
+		       json_add_string 'error' "preflight 输出无法解析"; json_dump; json_cleanup ;;
+	esac
+}
+
+# ── 日志 ──────────────────────────────────────────────────────────────────────
+get_log() {
+	local source="$1" path lines=''
+	case "$source" in
+		syslog)
+			path="logread -e $NAME"
+			lines="$(logread -e "$NAME" 2>/dev/null | tail -n "$LOG_LINES")"
+			;;
+		*)
+			source="product"
+			path="$(log_dir)/current.jsonl"
+			[ -f "$path" ] && lines="$(tail -n "$LOG_LINES" "$path" 2>/dev/null)"
+			;;
+	esac
+
+	json_init
+	json_add_string 'source' "$source"
+	json_add_string 'path'   "$path"
+	json_add_string 'log'    "$lines"
+	json_dump; json_cleanup
+}
+
+clear_log() {
+	local file; file="$(log_dir)/current.jsonl"
+	if [ -f "$file" ]; then
+		if : > "$file" 2>/dev/null; then print_json_bool "result" '1'
+		else                            print_json_bool "result" '0'; fi
+	else
+		print_json_bool "result" '0'
+	fi
+}
+
+# ── 服务控制 ──────────────────────────────────────────────────────────────────
+set_init_action() {
+	local action="$1" cmd
+	case "$action" in
+		enable)  cmd="/etc/init.d/${NAME} enable" ;;
+		disable) cmd="/etc/init.d/${NAME} disable" ;;
+		start)   cmd="/etc/init.d/${NAME} start" ;;
+		stop)    cmd="/etc/init.d/${NAME} stop" ;;
+		restart) cmd="/etc/init.d/${NAME} restart" ;;
+		reload)  cmd="/etc/init.d/${NAME} reload" ;;
+		hot_reload) cmd="/etc/init.d/${NAME} hot_reload" ;;
+		enable_start)
+			cmd="/etc/init.d/${NAME} enable && /etc/init.d/${NAME} start" ;;
+	esac
+	if [ -n "$cmd" ] && eval "$cmd" >/dev/null 2>&1; then
+		print_json_bool "result" '1'
+	else
+		print_json_bool "result" '0'
+	fi
+}
+
+# ── RPC dispatcher ────────────────────────────────────────────────────────────
+case "$1" in
+	list)
+		json_init
+		json_add_object "getInitStatus"
+			json_add_string 'name' "name"
+		json_close_object
+		json_add_object "getMem"
+			json_add_string 'name' "name"
+		json_close_object
+		json_add_object "setInitAction"
+			json_add_string 'name'   "name"
+			json_add_string 'action' "action"
+		json_close_object
+		json_add_object "getPreflight"; json_close_object
+		json_add_object "getLog"
+			json_add_string 'source' "source"
+		json_close_object
+		json_add_object "clearLog"; json_close_object
+		json_dump; json_cleanup
+		;;
+	call)
+		case "$2" in
+			getInitStatus)
+				read -r input; json_load "$input"
+				json_get_var name 'name'; json_cleanup
+				[ "$name" = "$NAME" ] || { print_json_bool "result" '0'; exit 0; }
+				get_init_status "$name" ;;
+			getMem)
+				read -r input; json_load "$input"
+				json_get_var name 'name'; json_cleanup
+				[ "$name" = "$NAME" ] || { print_json_bool "result" '0'; exit 0; }
+				get_mem "$name" ;;
+			setInitAction)
+				read -r input; json_load "$input"
+				json_get_var action 'action'; json_cleanup
+				set_init_action "$action" ;;
+			getPreflight)
+				get_preflight ;;
+			getLog)
+				read -r input; json_load "$input"
+				json_get_var source 'source'; json_cleanup
+				get_log "$source" ;;
+			clearLog)
+				clear_log ;;
+		esac ;;
+esac

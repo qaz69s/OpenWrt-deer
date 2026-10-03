@@ -28,7 +28,18 @@ ln -sf ../v2ray/geosite.dat /usr/share/deer/geosite.dat  2>/dev/null || true
 
 # 出厂默认：不预设开机自启（不创建 /etc/rc.d/S95deer）、不启动服务。
 # 「开机自启」与「启动」都由用户在 LuCI 里自行操作。
-# 这里刻意不调用 enable/disable：升级/重装时会重跑本脚本（default_postinst
-# 里没有升级判断），一旦调用就会覆盖用户已经做出的选择。
+#
+# ⚠️ 光"不调用 enable/disable"是不够的：OpenWrt 的 default_postinst 在**全新安装**
+# 时会对本包 filelist 里所有 /etc/init.d/* 逐个执行 enable + start
+# （源码 package/base-files/files/lib/functions.sh，无 PKG_UPGRADE 判断的那段），
+# 所以装上就会自启 + 立刻跑起来。这里在全新安装时反过来关掉它。
+# 升级/重装时 PKG_UPGRADE=1（post-upgrade 里 export），跳过 → 保留用户的选择。
+#
+# 前提：本脚本（luci-app-deer）在守护进程包之后安装（apk 按依赖顺序装，
+# 实测 "(1/2) Installing deer (2/2) Installing luci-app-deer"）。
+if [ -z "$PKG_UPGRADE" ]; then
+	/etc/init.d/deer stop    2>/dev/null || true
+	/etc/init.d/deer disable 2>/dev/null || true
+fi
 
 return 0

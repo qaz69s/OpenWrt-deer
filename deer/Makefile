@@ -131,7 +131,6 @@ define Package/deer/postinst
 [ -z "$${IPKG_INSTROOT}" ] && {
 	mkdir -p /etc/deer
 	chmod 0700 /etc/deer 2>/dev/null || true
-	[ -x /etc/init.d/deer ] && /etc/init.d/deer enable 2>/dev/null || true
 	# 升级场景：服务已在跑则重启，让新二进制的 Web UI / API 生效
 	if /etc/init.d/deer running 2>/dev/null; then
 		/etc/init.d/deer restart 2>/dev/null || true

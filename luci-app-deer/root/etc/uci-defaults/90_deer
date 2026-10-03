@@ -3,7 +3,7 @@
 #
 # uci-defaults: luci-app-deer 首次安装初始化
 # deer 包已经装好 /etc/init.d/deer、/etc/config/deer、/usr/bin/daed；
-# 这里只处理权限、目录、软链与自启。
+# 这里只处理权限、目录与软链。
 
 # rpcd helper 权限（个别构建里安装后可能不是 755）
 chmod 0755 /usr/libexec/rpcd/luci.deer 2>/dev/null || true
@@ -26,7 +26,9 @@ ln -sf ../v2ray/geosite.dat /usr/share/deer/geosite.dat  2>/dev/null || true
 # 让 rpcd 立刻加载新的 ACL / helper
 /etc/init.d/rpcd restart
 
-# 自启（不在安装时启动服务；由用户从 LuCI 点启动，或重启后随 rc.d 启动）
-/etc/init.d/deer enable 2>/dev/null || true
+# 出厂默认：不预设开机自启（不创建 /etc/rc.d/S95deer）、不启动服务。
+# 「开机自启」与「启动」都由用户在 LuCI 里自行操作。
+# 这里刻意不调用 enable/disable：升级/重装时会重跑本脚本（default_postinst
+# 里没有升级判断），一旦调用就会覆盖用户已经做出的选择。
 
 return 0
